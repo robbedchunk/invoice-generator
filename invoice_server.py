@@ -115,75 +115,106 @@ def _find_font_path(env_var: str, candidates: List[str]) -> Optional[str]:
 
 
 class FontManager:
+    PRIMARY_FAMILY = "InvoiceFont"
+    FALLBACK_FAMILY = "FallbackFont"
+
     def __init__(self, pdf: FPDF) -> None:
         self.pdf = pdf
         self.family = "Helvetica"
         self.use_unicode = False
         self.has_bold = False
-        self.font_path = _find_font_path(
-            "INVOICE_FONT_PATH",
-            [
-                # macOS
-                "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-                "/Library/Fonts/Arial Unicode.ttf",
-                "/System/Library/Fonts/Apple Symbols.ttf",
-                # Linux (common distro paths)
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
-                "/usr/share/fonts/TTF/DejaVuSans.ttf",
-                "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-                "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
-                "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-                "/usr/share/fonts/gnu-free/FreeSans.ttf",
-                # Bundled fallback (always available)
-                os.path.join(_SCRIPT_DIR, "fonts", "DejaVuSans.ttf"),
-            ],
-        )
-        self.font_bold_path = _find_font_path(
-            "INVOICE_FONT_BOLD_PATH",
-            [
-                # Linux bold variants
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-                "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
-                "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
-                "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-                "/usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf",
-                "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-                "/usr/share/fonts/gnu-free/FreeSansBold.ttf",
-                # Bundled fallback (always available)
-                os.path.join(_SCRIPT_DIR, "fonts", "DejaVuSans-Bold.ttf"),
-            ],
-        )
-        if self.font_path:
+        self.has_fallback = False
+        self._primary_cw: Optional[list] = None
+
+        # Primary font: NimbusSans (clean look)
+        primary_path = os.path.join(_SCRIPT_DIR, "fonts", "NimbusSans-Regular.ttf")
+        primary_bold_path = os.path.join(_SCRIPT_DIR, "fonts", "NimbusSans-Bold.ttf")
+
+        # Fallback font: DejaVu Sans (wide Unicode coverage)
+        fallback_path = os.path.join(_SCRIPT_DIR, "fonts", "DejaVuSans.ttf")
+        fallback_bold_path = os.path.join(_SCRIPT_DIR, "fonts", "DejaVuSans-Bold.ttf")
+
+        if os.path.exists(primary_path):
             try:
-                self.pdf.add_font("InvoiceFont", "", self.font_path, uni=True)
-                if self.font_bold_path:
-                    self.pdf.add_font("InvoiceFont", "B", self.font_bold_path, uni=True)
+                self.pdf.add_font(self.PRIMARY_FAMILY, "", primary_path, uni=True)
+                if os.path.exists(primary_bold_path):
+                    self.pdf.add_font(self.PRIMARY_FAMILY, "B", primary_bold_path, uni=True)
                     self.has_bold = True
-                self.family = "InvoiceFont"
+                self.family = self.PRIMARY_FAMILY
                 self.use_unicode = True
             except Exception:
-                self.family = "Helvetica"
-                self.use_unicode = False
+                pass
+
+        if os.path.exists(fallback_path):
+            try:
+                self.pdf.add_font(self.FALLBACK_FAMILY, "", fallback_path, uni=True)
+                if os.path.exists(fallback_bold_path):
+                    self.pdf.add_font(self.FALLBACK_FAMILY, "B", fallback_bold_path, uni=True)
+                self.has_fallback = True
+                # If primary failed, use fallback as main font
+                if not self.use_unicode:
+                    self.family = self.FALLBACK_FAMILY
+                    self.use_unicode = True
+                    self.has_bold = os.path.exists(fallback_bold_path)
+            except Exception:
+                pass
+
+        # Cache primary font char widths for fallback checks
+        if self.family == self.PRIMARY_FAMILY and self.has_fallback:
+            self.pdf.set_font(self.PRIMARY_FAMILY, "", 10)
+            self._primary_cw = self.pdf.current_font.get("cw")
+
+    def _needs_fallback(self, char: str) -> bool:
+        """Check if a character is missing from the primary font."""
+        if self._primary_cw is None:
+            return False
+        code = ord(char)
+        if code >= len(self._primary_cw):
+            return True
+        return self._primary_cw[code] == 0
+
+    def _split_runs(self, text: str) -> List[Tuple[str, bool]]:
+        """Split text into runs of (substring, needs_fallback)."""
+        if self._primary_cw is None:
+            return [(text, False)]
+        runs: List[Tuple[str, bool]] = []
+        current = ""
+        current_fallback = False
+        for ch in text:
+            fb = self._needs_fallback(ch)
+            if fb != current_fallback and current:
+                runs.append((current, current_fallback))
+                current = ""
+            current += ch
+            current_fallback = fb
+        if current:
+            runs.append((current, current_fallback))
+        return runs
 
     def set_font(self, size: int) -> None:
         self.pdf.set_font(self.family, "", size)
 
     def text_width(self, text: str, size: int) -> float:
-        self.set_font(size)
-        return self.pdf.get_string_width(text)
+        total = 0.0
+        for run, fallback in self._split_runs(text):
+            family = self.FALLBACK_FAMILY if fallback else self.family
+            self.pdf.set_font(family, "", size)
+            total += self.pdf.get_string_width(run)
+        return total
 
     def draw_text(self, x: float, y: float, text: str, size: int, color: Tuple[int, int, int], bold: bool = False) -> None:
-        self.set_font(size)
         self.pdf.set_text_color(*color)
-        if bold and self.has_bold:
-            self.pdf.set_font(self.family, "B", size)
-            self.pdf.text(x, y, text)
-        elif bold:
-            self.pdf.text(x, y, text)
-            self.pdf.text(x + 0.4, y, text)
-        else:
-            self.pdf.text(x, y, text)
+        cursor_x = x
+        for run, fallback in self._split_runs(text):
+            family = self.FALLBACK_FAMILY if fallback else self.family
+            style = "B" if bold and self.has_bold else ""
+            self.pdf.set_font(family, style, size)
+            if bold and not self.has_bold:
+                self.pdf.text(cursor_x, y, run)
+                self.pdf.text(cursor_x + 0.4, y, run)
+            else:
+                self.pdf.text(cursor_x, y, run)
+            cursor_x += self.pdf.get_string_width(run)
 
 
 def _fmt_money(amount: float, symbol: str) -> str:
