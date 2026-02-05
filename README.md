@@ -1,12 +1,17 @@
 # Invoice Generator
 
-A lightweight HTTP server that generates professional PDF invoices from JSON payloads. No database, no frontend — just send JSON, get a PDF.
+[![CI](https://github.com/robbedchunk/invoice-generator/actions/workflows/ci.yml/badge.svg)](https://github.com/robbedchunk/invoice-generator/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/robbedchunk/invoice-generator/actions/workflows/codeql.yml/badge.svg)](https://github.com/robbedchunk/invoice-generator/actions/workflows/codeql.yml)
+[![Dependency Review](https://github.com/robbedchunk/invoice-generator/actions/workflows/dependency-review.yml/badge.svg)](https://github.com/robbedchunk/invoice-generator/actions/workflows/dependency-review.yml)
+
+A lightweight HTTP server that generates professional PDF invoices from JSON payloads.
+No database, no frontend; just send JSON and get a PDF.
 
 ## Quick Start
 
 ```bash
 pip install -r requirements.txt
-python invoice_server.py
+python -m invoice_generator
 ```
 
 The server starts on `http://0.0.0.0:8080` by default.
@@ -21,6 +26,8 @@ curl -X POST http://localhost:8080/invoice \
   -d @example.json \
   -o invoice.pdf
 ```
+
+An example request body is included at [`example.json`](example.json).
 
 ### JSON Payload
 
@@ -90,14 +97,81 @@ sudo apt-get install fonts-dejavu-core
 sudo dnf install dejavu-sans-fonts
 ```
 
+## Supported Versions
+
+- Python: `3.10`, `3.11`, `3.12` (CI-tested)
+- OS/runtime: Linux and macOS are supported for font auto-detection
+- Windows: expected to work with explicit font paths via `INVOICE_FONT_PATH`/`INVOICE_FONT_BOLD_PATH`, but not CI-tested
+
+## API Errors
+
+The API returns JSON errors in the shape:
+
+```json
+{
+  "error": "error_code",
+  "detail": "Human-readable explanation"
+}
+```
+
+Common responses:
+
+| HTTP Status | `error` | When it happens |
+|------------:|---------|-----------------|
+| `400` | `invalid_content_length` | `Content-Length` is not an integer |
+| `400` | `empty_body` | Body size is `0` bytes |
+| `400` | `invalid_encoding` | Body is not valid UTF-8 |
+| `400` | `invalid_json` | Body is not valid JSON |
+| `400` | `invalid_payload` | Root JSON is not an object, or `items` is not an array |
+| `404` | `not_found` | Unsupported route |
+| `411` | `missing_content_length` | `Content-Length` header is missing |
+| `413` | `payload_too_large` | Body exceeds `INVOICE_MAX_BODY_BYTES` |
+| `413` | `invoice_too_large` | Estimated pages exceed `INVOICE_MAX_PAGES` |
+| `503` | `server_busy` | Render queue is saturated |
+| `503` | `render_pool_restarting` | Worker pool restarted; retry shortly |
+| `504` | `render_timeout` | Render exceeded `INVOICE_RENDER_TIMEOUT_MS` |
+| `500` | `render_failed` | Unexpected render failure |
+
 ## Features
 
-- Single-file server, no framework dependencies
+- Modular package layout (`invoice_generator/`) with clear separation of concerns
+- Framework-free HTTP API built on Python standard library
 - Automatic multi-page layout for large invoices
 - USD, EUR, GBP currency support
 - Percentage or flat discount support
 - Unicode text support with auto font detection (macOS + Linux)
 - Threaded request handling
+
+## Project Structure
+
+```text
+invoice_generator/
+  __main__.py      # Runtime entrypoint
+  server.py        # HTTP handlers and render worker orchestration
+  rendering.py     # PDF invoice rendering engine
+  formatting.py    # Text, money, date, and drawing helpers
+  fonts.py         # Font discovery and FPDF font registration
+  pagination.py    # Pagination estimation helpers
+  config.py        # Environment-driven runtime configuration
+  pdf_constants.py # Invoice layout/style constants
+```
+
+## Testing
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+```
+
+## Troubleshooting
+
+- `Missing dependency 'fpdf'` on startup:
+  Install dependencies with `pip install -r requirements.txt`.
+- Invoice renders but text is missing/garbled:
+  Ensure valid TTF fonts are available and, if needed, set `INVOICE_FONT_PATH` and `INVOICE_FONT_BOLD_PATH`.
+- `server_busy` (`503`) under load:
+  Increase `INVOICE_MAX_INFLIGHT_RENDERS` and/or `INVOICE_MAX_CONCURRENT_RENDERS` based on host capacity.
+- `invoice_too_large` (`413`) for very large invoices:
+  Increase `INVOICE_MAX_PAGES` or reduce line items per invoice.
 
 ## License
 

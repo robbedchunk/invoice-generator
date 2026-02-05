@@ -1,0 +1,96 @@
+"""Static layout and style constants used by invoice PDF rendering."""
+
+from typing import Dict, Tuple
+
+PAGE_W = 612
+PAGE_H = 792
+
+# Layout constants (points, top-left origin)
+X_LEFT = 48
+X_ITEM = 45
+X_BAR = 30
+BAR_W = 552
+BAR_H = 20
+
+# First-page table header
+BAR_Y_FIRST = 209.0
+BAR_TEXT_Y_FIRST = 221.2
+
+# Continuation-page table header (no top invoice header)
+BAR_Y_CONT = 12.8
+BAR_TEXT_Y_CONT = 24.8
+
+TITLE_RIGHT = 573
+NUMBER_RIGHT = 568
+DATE_LABEL_RIGHT = 461
+RIGHT_AMOUNT = 566
+RATE_RIGHT = 492
+LABEL_RIGHT = 491
+
+NAME_Y = 33.8
+TITLE_Y = 48.0
+NUMBER_Y = 67.5
+DATE_Y = 117.8
+BALANCE_Y = 141.8
+
+BILL_TO_LABEL_Y = 131.2
+BILL_TO_NAME_Y = 147.0
+BILL_TO_ADDR_Y = 159.0
+ADDR_LINE_H = 12.0
+
+BALANCE_BOX_X = 317.0
+BALANCE_BOX_Y = 126.0
+BALANCE_BOX_W = 270.0
+BALANCE_BOX_H = 27.0
+
+ITEMS_START_Y_FIRST = 246.8
+ITEMS_START_Y_CONT = 42.0
+ITEM_ROW_H = 17.2
+
+TOTALS_START_Y_FIRST = 315.8
+TOTAL_ROW_H_FIRST = 17.2
+TOTALS_START_Y_CONT = 141.8
+TOTAL_ROW_H_CONT = 21.7
+
+NOTES_LABEL_Y_FIRST = 401.2
+NOTES_TEXT_Y_FIRST = 418.5
+NOTES_LINE_H_FIRST = 17.2
+NOTES_LABEL_Y_CONT = 240.0
+NOTES_TEXT_Y_CONT = 256.5
+NOTES_LINE_H_CONT = 17.2
+
+# Pagination capacities (empirically derived from existing invoices)
+FIRST_PAGE_CAPACITY = 28
+MID_PAGE_CAPACITY = 40
+LAST_PAGE_CAPACITY = 6
+
+# Colors (RGB)
+Color = Tuple[int, int, int]
+COLOR_TITLE: Color = (94, 94, 94)          # #5E5E5E
+COLOR_INVOICE_NUM: Color = (149, 149, 149) # #959595
+COLOR_LABEL: Color = (105, 105, 105)       # #696969
+COLOR_BILLTO: Color = (145, 145, 145)      # #919191
+COLOR_TEXT: Color = (106, 106, 106)        # #6A6A6A
+COLOR_TEXT_ALT: Color = (115, 115, 115)    # #737373
+COLOR_ITEM: Color = (105, 105, 105)        # #696969
+COLOR_NUM: Color = (113, 113, 113)         # #717171
+COLOR_NOTES: Color = (111, 111, 111)       # #6F6F6F
+COLOR_BAR: Color = (58, 58, 58)            # #3A3A3A
+COLOR_BAR_TEXT: Color = (234, 234, 234)    # #EAEAEA
+COLOR_BOX: Color = (249, 249, 249)         # #F9F9F9
+
+FONT_SIZE_TITLE = 28
+FONT_SIZE_NORMAL = 10
+FONT_SIZE_SMALL = 9
+
+BAR_RADIUS = 4.0
+BOX_RADIUS = 4.0
+
+NAME_LINE_H = 13.0
+ITEM_TO_QTY_GUTTER = 18.0
+
+DEFAULT_CURRENCY_SYMBOLS: Dict[str, str] = {
+    "USD": "$",
+    "EUR": "\u20ac",
+    "GBP": "\u00a3",
+}

@@ -7,10 +7,11 @@ Thanks for your interest in contributing!
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/my-feature`)
 3. Make your changes
-4. Test locally by running the server and sending a sample invoice payload
-5. Commit your changes (`git commit -m "Add my feature"`)
-6. Push to the branch (`git push origin feature/my-feature`)
-7. Open a Pull Request
+4. Run tests (`python -m unittest discover -s tests -p "test_*.py"`)
+5. Test locally by running the server and sending a sample invoice payload
+6. Commit your changes (`git commit -m "Add my feature"`)
+7. Push to the branch (`git push origin feature/my-feature`)
+8. Open a Pull Request
 
 ## Reporting Issues
 
@@ -21,9 +22,9 @@ Open an issue on GitHub with:
 
 ## Code Style
 
-- Follow existing patterns in the codebase
-- Keep it simple — this is a single-file server by design
-- Type hints are appreciated
+- Follow existing module boundaries and naming conventions
+- Keep functions focused and composable
+- Add type hints for new public functions/classes
 
 ## License
 

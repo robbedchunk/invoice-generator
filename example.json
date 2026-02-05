@@ -1,0 +1,14 @@
+{
+  "from": "Your Company Name",
+  "to": "Client Name\n123 Main St\nCity, ST 12345",
+  "number": "INV-001",
+  "date": "2026-01-15",
+  "items": [
+    { "name": "Web Development", "quantity": 40, "unit_cost": 150.0 },
+    { "name": "Design Work", "quantity": 10, "unit_cost": 120.0 }
+  ],
+  "notes": "Payment due within 30 days.\nThank you for your business!",
+  "currency": "USD",
+  "discounts": 10,
+  "fields": { "discounts": "%" }
+}

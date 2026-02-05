@@ -1,1 +1,1 @@
-web: python invoice_server.py
+web: python -m invoice_generator
