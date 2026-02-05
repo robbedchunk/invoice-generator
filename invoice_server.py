@@ -4,6 +4,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 
+from dateutil import parser as dateutil_parser
 from fpdf import FPDF  # type: ignore
 import fpdf as fpdf_module  # for cache mode
 
@@ -238,6 +239,18 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _fmt_date(raw: str) -> str:
+    """Parse a date string and return it formatted as 'Mar 14, 2025'."""
+    raw = raw.strip()
+    if not raw:
+        return raw
+    try:
+        dt = dateutil_parser.parse(raw)
+        return dt.strftime("%b %d, %Y")
+    except (ValueError, OverflowError):
+        return raw
+
+
 def _split_lines(text: str) -> List[str]:
     if not text:
         return []
@@ -409,7 +422,7 @@ def render_invoice(data: Dict[str, Any]) -> bytes:
                 for i, line in enumerate(to_block[3:], start=2):
                     fonts.draw_text(X_LEFT, BILL_TO_ADDR_Y + ADDR_LINE_H * (i + 1), line, FONT_SIZE_SMALL, COLOR_TEXT_ALT, bold=False)
 
-        date_str = str(data.get("date", "")).strip()
+        date_str = _fmt_date(str(data.get("date", "")))
         if date_str:
             fonts.draw_text(
                 DATE_LABEL_RIGHT - fonts.text_width("Date:", FONT_SIZE_NORMAL),
