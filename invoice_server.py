@@ -136,7 +136,7 @@ class FontManager:
                 "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
                 "/usr/share/fonts/gnu-free/FreeSans.ttf",
                 # Bundled fallback (always available)
-                os.path.join(_SCRIPT_DIR, "fonts", "NimbusSans-Regular.ttf"),
+                os.path.join(_SCRIPT_DIR, "fonts", "DejaVuSans.ttf"),
             ],
         )
         self.font_bold_path = _find_font_path(
@@ -151,7 +151,7 @@ class FontManager:
                 "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
                 "/usr/share/fonts/gnu-free/FreeSansBold.ttf",
                 # Bundled fallback (always available)
-                os.path.join(_SCRIPT_DIR, "fonts", "NimbusSans-Bold.ttf"),
+                os.path.join(_SCRIPT_DIR, "fonts", "DejaVuSans-Bold.ttf"),
             ],
         )
         if self.font_path:
