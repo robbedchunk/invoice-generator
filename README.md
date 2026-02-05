@@ -69,6 +69,8 @@ Each item in `items`:
 |---------------------|---------|-------------|
 | `INVOICE_HOST` | `0.0.0.0` | Server bind address |
 | `INVOICE_PORT` | `8080` | Server port |
+| `INVOICE_MAX_BODY_BYTES` | `268435456` | Maximum accepted request size in bytes |
+| `INVOICE_MAX_PAGES` | `10000` | Maximum rendered page count before request is rejected |
 | `INVOICE_FONT_PATH` | *(auto-detected)* | Path to a TTF font for Unicode support |
 | `INVOICE_FONT_BOLD_PATH` | *(auto-detected)* | Path to bold TTF font variant |
 

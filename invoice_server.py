@@ -1,3 +1,4 @@
+import errno
 import json
 import os
 import sys
@@ -101,6 +102,48 @@ DEFAULT_CURRENCY_SYMBOLS = {
     "EUR": "\u20ac",
     "GBP": "\u00a3",
 }
+
+DISCONNECT_ERRNOS = {
+    errno.EPIPE,
+    errno.ECONNRESET,
+    errno.ETIMEDOUT,
+}
+if hasattr(errno, "WSAECONNRESET"):
+    DISCONNECT_ERRNOS.add(errno.WSAECONNRESET)  # pragma: no cover
+
+
+def _is_client_disconnect(exc: BaseException) -> bool:
+    if isinstance(exc, (BrokenPipeError, ConnectionResetError, TimeoutError)):
+        return True
+    return isinstance(exc, OSError) and exc.errno in DISCONNECT_ERRNOS
+
+
+def _env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= minimum else default
+
+
+def _estimate_page_count(item_count: int) -> int:
+    if item_count <= FIRST_PAGE_CAPACITY:
+        return 1
+    remaining = item_count - FIRST_PAGE_CAPACITY
+    if remaining <= LAST_PAGE_CAPACITY:
+        return 2
+    mid_items = remaining - LAST_PAGE_CAPACITY
+    mid_pages = (mid_items + MID_PAGE_CAPACITY - 1) // MID_PAGE_CAPACITY
+    return 2 + mid_pages
+
+
+def _max_items_for_pages(page_count: int) -> int:
+    if page_count <= 1:
+        return FIRST_PAGE_CAPACITY
+    return FIRST_PAGE_CAPACITY + LAST_PAGE_CAPACITY + MID_PAGE_CAPACITY * (page_count - 2)
 
 
 def _find_font_path(env_var: str, candidates: List[str]) -> Optional[str]:
@@ -475,17 +518,18 @@ def render_invoice(data: Dict[str, Any]) -> bytes:
         draw_table_header(BAR_Y_FIRST, BAR_TEXT_Y_FIRST)
         draw_items(ITEMS_START_Y_FIRST, items[:FIRST_PAGE_CAPACITY], ITEM_ROW_H)
 
-        remaining = items[FIRST_PAGE_CAPACITY:]
-        while len(remaining) > LAST_PAGE_CAPACITY:
-            take = min(MID_PAGE_CAPACITY, len(remaining) - LAST_PAGE_CAPACITY)
+        cursor = FIRST_PAGE_CAPACITY
+        last_page_start = len(items) - LAST_PAGE_CAPACITY
+        while cursor < last_page_start:
+            take = min(MID_PAGE_CAPACITY, last_page_start - cursor)
             pdf.add_page()
             draw_table_header(BAR_Y_CONT, BAR_TEXT_Y_CONT)
-            draw_items(ITEMS_START_Y_CONT, remaining[:take], ITEM_ROW_H)
-            remaining = remaining[take:]
+            draw_items(ITEMS_START_Y_CONT, items[cursor:cursor + take], ITEM_ROW_H)
+            cursor += take
 
         pdf.add_page()
         draw_table_header(BAR_Y_CONT, BAR_TEXT_Y_CONT)
-        draw_items(ITEMS_START_Y_CONT, remaining, ITEM_ROW_H)
+        draw_items(ITEMS_START_Y_CONT, items[cursor:], ITEM_ROW_H)
         draw_totals(TOTALS_START_Y_CONT, TOTAL_ROW_H_CONT)
         draw_notes(NOTES_LABEL_Y_CONT, NOTES_TEXT_Y_CONT, NOTES_LINE_H_CONT)
 
@@ -493,37 +537,127 @@ def render_invoice(data: Dict[str, Any]) -> bytes:
 
 
 class InvoiceHandler(BaseHTTPRequestHandler):
+    MAX_BODY_BYTES = _env_int("INVOICE_MAX_BODY_BYTES", 256 * 1024 * 1024, minimum=1024)
+    MAX_PAGES = _env_int("INVOICE_MAX_PAGES", 10000, minimum=1)
+
+    def _write_response(self, status: int, content_type: str, body: bytes) -> bool:
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return True
+        except Exception as exc:
+            if _is_client_disconnect(exc):
+                return False
+            raise
+
+    def _send_json(self, status: int, payload: Dict[str, Any]) -> bool:
+        body = json.dumps(payload).encode("utf-8")
+        return self._write_response(status, "application/json", body)
+
+    def _read_body(self) -> Optional[bytes]:
+        header = self.headers.get("Content-Length")
+        if header is None:
+            self._send_json(
+                411,
+                {
+                    "error": "missing_content_length",
+                    "detail": "Content-Length header is required.",
+                },
+            )
+            return None
+
+        try:
+            content_length = int(header)
+        except ValueError:
+            self._send_json(400, {"error": "invalid_content_length", "detail": "Content-Length must be an integer."})
+            return None
+
+        if content_length <= 0:
+            self._send_json(400, {"error": "empty_body", "detail": "Request body cannot be empty."})
+            return None
+
+        if content_length > self.MAX_BODY_BYTES:
+            self._send_json(
+                413,
+                {
+                    "error": "payload_too_large",
+                    "detail": f"Body exceeds {self.MAX_BODY_BYTES} bytes.",
+                },
+            )
+            return None
+
+        try:
+            return self.rfile.read(content_length)
+        except Exception as exc:
+            if _is_client_disconnect(exc):
+                return None
+            raise
+
     def do_POST(self) -> None:
         if self.path not in ("/", "/invoice", "/generate"):
-            self.send_error(404, "Not Found")
+            self._send_json(404, {"error": "not_found", "detail": "Unsupported endpoint."})
             return
 
-        content_length = int(self.headers.get("Content-Length", "0"))
-        body = self.rfile.read(content_length) if content_length else b""
+        body = self._read_body()
+        if body is None:
+            return
 
         try:
             payload = json.loads(body.decode("utf-8"))
-        except Exception as exc:
-            self.send_response(400)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": "invalid_json", "detail": str(exc)}).encode("utf-8"))
+        except UnicodeDecodeError:
+            self._send_json(400, {"error": "invalid_encoding", "detail": "Body must be UTF-8 encoded JSON."})
+            return
+        except json.JSONDecodeError as exc:
+            self._send_json(
+                400,
+                {
+                    "error": "invalid_json",
+                    "detail": f"{exc.msg} (line {exc.lineno}, column {exc.colno})",
+                },
+            )
+            return
+
+        if not isinstance(payload, dict):
+            self._send_json(400, {"error": "invalid_payload", "detail": "JSON root must be an object."})
+            return
+
+        items = payload.get("items", [])
+        if items is None:
+            items = []
+        if not isinstance(items, list):
+            self._send_json(400, {"error": "invalid_payload", "detail": "'items' must be an array."})
+            return
+
+        estimated_pages = _estimate_page_count(len(items))
+        if estimated_pages > self.MAX_PAGES:
+            self._send_json(
+                413,
+                {
+                    "error": "invoice_too_large",
+                    "detail": f"Invoice would render {estimated_pages} pages; maximum is {self.MAX_PAGES}.",
+                    "max_items": _max_items_for_pages(self.MAX_PAGES),
+                },
+            )
             return
 
         try:
             pdf_bytes = render_invoice(payload)
         except Exception as exc:
-            self.send_response(500)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(json.dumps({"error": "render_failed", "detail": str(exc)}).encode("utf-8"))
+            self._send_json(500, {"error": "render_failed", "detail": str(exc)})
             return
 
-        self.send_response(200)
-        self.send_header("Content-Type", "application/pdf")
-        self.send_header("Content-Length", str(len(pdf_bytes)))
-        self.end_headers()
-        self.wfile.write(pdf_bytes)
+        self._write_response(200, "application/pdf", pdf_bytes)
+
+    def handle_one_request(self) -> None:
+        try:
+            super().handle_one_request()
+        except Exception as exc:
+            if _is_client_disconnect(exc):
+                return
+            raise
 
     def log_message(self, format: str, *args: Any) -> None:
         return
