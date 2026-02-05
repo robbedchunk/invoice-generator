@@ -157,9 +157,9 @@ def _max_items_for_pages(page_count: int) -> int:
     return FIRST_PAGE_CAPACITY + LAST_PAGE_CAPACITY + MID_PAGE_CAPACITY * (page_count - 2)
 
 
-DEFAULT_MAX_CONCURRENT_RENDERS = 2
+DEFAULT_MAX_CONCURRENT_RENDERS = 4
 MAX_CONCURRENT_RENDERS = _env_int("INVOICE_MAX_CONCURRENT_RENDERS", DEFAULT_MAX_CONCURRENT_RENDERS, minimum=1)
-RENDER_QUEUE_TIMEOUT_MS = _env_int("INVOICE_RENDER_QUEUE_TIMEOUT_MS", 1500, minimum=0)
+RENDER_QUEUE_TIMEOUT_MS = _env_int("INVOICE_RENDER_QUEUE_TIMEOUT_MS", 45000, minimum=0)
 RENDER_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_RENDERS)
 
 
@@ -664,12 +664,14 @@ class InvoiceHandler(BaseHTTPRequestHandler):
 
         acquired = RENDER_SEMAPHORE.acquire(timeout=RENDER_QUEUE_TIMEOUT_MS / 1000.0)
         if not acquired:
+            retry_after_seconds = max(1, (RENDER_QUEUE_TIMEOUT_MS + 999) // 1000)
             self._send_json(
                 503,
                 {
                     "error": "server_busy",
                     "detail": "Renderer is saturated; retry shortly.",
                     "retry_after_ms": RENDER_QUEUE_TIMEOUT_MS,
+                    "retry_after_seconds": retry_after_seconds,
                 },
             )
             return
