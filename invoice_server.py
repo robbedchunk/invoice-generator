@@ -7,6 +7,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from fpdf import FPDF  # type: ignore
 import fpdf as fpdf_module  # for cache mode
 
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # Avoid writing font cache files into system font directories
 fpdf_module.FPDF_CACHE_MODE = 1
 
@@ -133,6 +135,8 @@ class FontManager:
                 "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf",
                 "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
                 "/usr/share/fonts/gnu-free/FreeSans.ttf",
+                # Bundled fallback (always available)
+                os.path.join(_SCRIPT_DIR, "fonts", "NimbusSans-Regular.ttf"),
             ],
         )
         self.font_bold_path = _find_font_path(
@@ -146,6 +150,8 @@ class FontManager:
                 "/usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf",
                 "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
                 "/usr/share/fonts/gnu-free/FreeSansBold.ttf",
+                # Bundled fallback (always available)
+                os.path.join(_SCRIPT_DIR, "fonts", "NimbusSans-Bold.ttf"),
             ],
         )
         if self.font_path:
@@ -160,40 +166,23 @@ class FontManager:
                 self.family = "Helvetica"
                 self.use_unicode = False
 
-    def _sanitize(self, text: str) -> str:
-        if self.use_unicode:
-            return text
-        return (
-            text.replace("\u2605", "*")
-            .replace("\u2122", "TM")
-            .replace("\u00ae", "(R)")
-        )
-
     def set_font(self, size: int) -> None:
-        if self.use_unicode:
-            self.pdf.set_font(self.family, "", size)
-        else:
-            self.pdf.set_font("Helvetica", "", size)
+        self.pdf.set_font(self.family, "", size)
 
     def text_width(self, text: str, size: int) -> float:
-        text = self._sanitize(text)
         self.set_font(size)
         return self.pdf.get_string_width(text)
 
     def draw_text(self, x: float, y: float, text: str, size: int, color: Tuple[int, int, int], bold: bool = False) -> None:
-        text = self._sanitize(text)
         self.set_font(size)
         self.pdf.set_text_color(*color)
-        if bold and self.use_unicode and self.has_bold:
+        if bold and self.has_bold:
             self.pdf.set_font(self.family, "B", size)
             self.pdf.text(x, y, text)
-        elif bold and self.use_unicode:
+        elif bold:
             self.pdf.text(x, y, text)
             self.pdf.text(x + 0.4, y, text)
         else:
-            style = "B" if bold and not self.use_unicode else ""
-            if not self.use_unicode:
-                self.pdf.set_font("Helvetica", style, size)
             self.pdf.text(x, y, text)
 
 
