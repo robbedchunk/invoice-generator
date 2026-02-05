@@ -76,7 +76,7 @@ Each item in `items`:
 | `INVOICE_RENDER_QUEUE_TIMEOUT_MS` | `120000` | Wait time for queue slot before returning `503` |
 | `INVOICE_RENDER_TIMEOUT_MS` | `300000` | Maximum render execution time before returning `504` |
 | `INVOICE_LISTEN_BACKLOG` | `512` | TCP accept backlog size for burst traffic |
-| `INVOICE_FONT_CACHE_DIR` | `/tmp/invoice-font-cache` | Directory for font metric cache files |
+| `INVOICE_FONT_CACHE_DIR` | `/tmp/invoice-font-cache` | Base directory for per-worker font metric cache files |
 | `INVOICE_FONT_PATH` | *(auto-detected)* | Path to a TTF font for Unicode support |
 | `INVOICE_FONT_BOLD_PATH` | *(auto-detected)* | Path to bold TTF font variant |
 

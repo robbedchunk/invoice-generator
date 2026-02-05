@@ -3,6 +3,7 @@ from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutureTimeou
 from concurrent.futures.process import BrokenProcessPool
 import errno
 import json
+import multiprocessing as mp
 import os
 import sys
 import threading
@@ -16,8 +17,9 @@ import fpdf as fpdf_module  # for cache mode
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Cache parsed font metrics in /tmp for faster, more stable repeated renders.
-FONT_CACHE_DIR = os.getenv("INVOICE_FONT_CACHE_DIR", "/tmp/invoice-font-cache")
+# Cache parsed font metrics under /tmp, scoped by process to avoid cross-process write races.
+FONT_CACHE_ROOT = os.getenv("INVOICE_FONT_CACHE_DIR", "/tmp/invoice-font-cache")
+FONT_CACHE_DIR = os.path.join(FONT_CACHE_ROOT, str(os.getpid()))
 try:
     os.makedirs(FONT_CACHE_DIR, exist_ok=True)
     fpdf_module.FPDF_CACHE_MODE = 2
@@ -171,7 +173,10 @@ RENDER_EXECUTOR: Optional[ProcessPoolExecutor] = None
 
 
 def _create_render_executor() -> ProcessPoolExecutor:
-    return ProcessPoolExecutor(max_workers=MAX_CONCURRENT_RENDERS)
+    return ProcessPoolExecutor(
+        max_workers=MAX_CONCURRENT_RENDERS,
+        mp_context=mp.get_context("spawn"),
+    )
 
 
 def _get_render_executor() -> ProcessPoolExecutor:
@@ -232,108 +237,61 @@ def _find_font_path(env_var: str, candidates: List[str]) -> Optional[str]:
 
 
 class FontManager:
-    PRIMARY_FAMILY = "InvoiceFont"
-    FALLBACK_FAMILY = "FallbackFont"
+    FAMILY = "InvoiceFont"
+    BUNDLED_REGULAR = os.path.join(_SCRIPT_DIR, "fonts", "DejaVuSans.ttf")
+    BUNDLED_BOLD = os.path.join(_SCRIPT_DIR, "fonts", "DejaVuSans-Bold.ttf")
+    SYSTEM_REGULAR_CANDIDATES = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+        "/Library/Fonts/DejaVuSans.ttf",
+    ]
+    SYSTEM_BOLD_CANDIDATES = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+        "/Library/Fonts/DejaVuSans-Bold.ttf",
+    ]
 
     def __init__(self, pdf: FPDF) -> None:
         self.pdf = pdf
-        self.family = "Helvetica"
-        self.use_unicode = False
+        self.family = self.FAMILY
         self.has_bold = False
-        self.has_fallback = False
-        self._primary_cw: Optional[list] = None
 
-        # Primary font: NimbusSans (clean look)
-        primary_path = os.path.join(_SCRIPT_DIR, "fonts", "NimbusSans-Regular.ttf")
-        primary_bold_path = os.path.join(_SCRIPT_DIR, "fonts", "NimbusSans-Bold.ttf")
+        regular_path = _find_font_path(
+            "INVOICE_FONT_PATH",
+            [self.BUNDLED_REGULAR, *self.SYSTEM_REGULAR_CANDIDATES],
+        )
+        if not regular_path:
+            raise RuntimeError(
+                "Unicode font not found. Set INVOICE_FONT_PATH to a valid TTF file."
+            )
 
-        # Fallback font: DejaVu Sans (wide Unicode coverage)
-        fallback_path = os.path.join(_SCRIPT_DIR, "fonts", "DejaVuSans.ttf")
-        fallback_bold_path = os.path.join(_SCRIPT_DIR, "fonts", "DejaVuSans-Bold.ttf")
+        bold_path = _find_font_path(
+            "INVOICE_FONT_BOLD_PATH",
+            [self.BUNDLED_BOLD, *self.SYSTEM_BOLD_CANDIDATES],
+        )
 
-        # pyfpdf font registration touches shared cache/files; serialize it.
         with FONT_INIT_LOCK:
-            if os.path.exists(primary_path):
-                try:
-                    self.pdf.add_font(self.PRIMARY_FAMILY, "", primary_path, uni=True)
-                    if os.path.exists(primary_bold_path):
-                        self.pdf.add_font(self.PRIMARY_FAMILY, "B", primary_bold_path, uni=True)
-                        self.has_bold = True
-                    self.family = self.PRIMARY_FAMILY
-                    self.use_unicode = True
-                except Exception:
-                    pass
-
-            if os.path.exists(fallback_path):
-                try:
-                    self.pdf.add_font(self.FALLBACK_FAMILY, "", fallback_path, uni=True)
-                    if os.path.exists(fallback_bold_path):
-                        self.pdf.add_font(self.FALLBACK_FAMILY, "B", fallback_bold_path, uni=True)
-                    self.has_fallback = True
-                    # If primary failed, use fallback as main font
-                    if not self.use_unicode:
-                        self.family = self.FALLBACK_FAMILY
-                        self.use_unicode = True
-                        self.has_bold = os.path.exists(fallback_bold_path)
-                except Exception:
-                    pass
-
-            # Cache primary font char widths for fallback checks
-            if self.family == self.PRIMARY_FAMILY and self.has_fallback:
-                self.pdf.set_font(self.PRIMARY_FAMILY, "", 10)
-                self._primary_cw = self.pdf.current_font.get("cw")
-
-    def _needs_fallback(self, char: str) -> bool:
-        """Check if a character is missing from the primary font."""
-        if self._primary_cw is None:
-            return False
-        code = ord(char)
-        if code >= len(self._primary_cw):
-            return True
-        return self._primary_cw[code] == 0
-
-    def _split_runs(self, text: str) -> List[Tuple[str, bool]]:
-        """Split text into runs of (substring, needs_fallback)."""
-        if self._primary_cw is None:
-            return [(text, False)]
-        runs: List[Tuple[str, bool]] = []
-        current = ""
-        current_fallback = False
-        for ch in text:
-            fb = self._needs_fallback(ch)
-            if fb != current_fallback and current:
-                runs.append((current, current_fallback))
-                current = ""
-            current += ch
-            current_fallback = fb
-        if current:
-            runs.append((current, current_fallback))
-        return runs
+            self.pdf.add_font(self.FAMILY, "", regular_path, uni=True)
+            if bold_path:
+                self.pdf.add_font(self.FAMILY, "B", bold_path, uni=True)
+                self.has_bold = True
 
     def set_font(self, size: int) -> None:
         self.pdf.set_font(self.family, "", size)
 
     def text_width(self, text: str, size: int) -> float:
-        total = 0.0
-        for run, fallback in self._split_runs(text):
-            family = self.FALLBACK_FAMILY if fallback else self.family
-            self.pdf.set_font(family, "", size)
-            total += self.pdf.get_string_width(run)
-        return total
+        self.pdf.set_font(self.family, "", size)
+        return self.pdf.get_string_width(text)
 
     def draw_text(self, x: float, y: float, text: str, size: int, color: Tuple[int, int, int], bold: bool = False) -> None:
         self.pdf.set_text_color(*color)
-        cursor_x = x
-        for run, fallback in self._split_runs(text):
-            family = self.FALLBACK_FAMILY if fallback else self.family
-            style = "B" if bold and self.has_bold else ""
-            self.pdf.set_font(family, style, size)
-            if bold and not self.has_bold:
-                self.pdf.text(cursor_x, y, run)
-                self.pdf.text(cursor_x + 0.4, y, run)
-            else:
-                self.pdf.text(cursor_x, y, run)
-            cursor_x += self.pdf.get_string_width(run)
+        style = "B" if bold and self.has_bold else ""
+        self.pdf.set_font(self.family, style, size)
+        if bold and not self.has_bold:
+            self.pdf.text(x, y, text)
+            self.pdf.text(x + 0.4, y, text)
+        else:
+            self.pdf.text(x, y, text)
 
 
 def _fmt_money(amount: float, symbol: str) -> str:
@@ -608,7 +566,18 @@ def render_invoice(data: Dict[str, Any]) -> bytes:
         draw_totals(TOTALS_START_Y_CONT, TOTAL_ROW_H_CONT)
         draw_notes(NOTES_LABEL_Y_CONT, NOTES_TEXT_Y_CONT, NOTES_LINE_H_CONT)
 
-    return pdf.output(dest="S").encode("latin-1")
+    pdf_blob = pdf.output(dest="S")
+    if isinstance(pdf_blob, (bytes, bytearray)):
+        return bytes(pdf_blob)
+    if isinstance(pdf_blob, str):
+        try:
+            return pdf_blob.encode("latin-1")
+        except UnicodeEncodeError as exc:
+            raise RuntimeError(
+                "PDF serialization failed due to non-Latin-1 content. "
+                "Check Unicode font configuration (INVOICE_FONT_PATH/INVOICE_FONT_BOLD_PATH)."
+            ) from exc
+    raise RuntimeError(f"Unexpected PDF output type: {type(pdf_blob).__name__}")
 
 
 class InvoiceHandler(BaseHTTPRequestHandler):
@@ -793,6 +762,7 @@ class InvoiceHTTPServer(ThreadingHTTPServer):
 
 
 def run(host: str = "0.0.0.0", port: int = 8080) -> None:
+    _get_render_executor()
     server = InvoiceHTTPServer((host, port), InvoiceHandler)
     print(f"Invoice API server listening on http://{host}:{port}")
     server.serve_forever()
