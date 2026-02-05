@@ -2,6 +2,8 @@ import errno
 import json
 import os
 import sys
+import threading
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -11,8 +13,15 @@ import fpdf as fpdf_module  # for cache mode
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Avoid writing font cache files into system font directories
-fpdf_module.FPDF_CACHE_MODE = 1
+# Cache parsed font metrics in /tmp for faster, more stable repeated renders.
+FONT_CACHE_DIR = os.getenv("INVOICE_FONT_CACHE_DIR", "/tmp/invoice-font-cache")
+try:
+    os.makedirs(FONT_CACHE_DIR, exist_ok=True)
+    fpdf_module.FPDF_CACHE_MODE = 2
+    fpdf_module.FPDF_CACHE_DIR = FONT_CACHE_DIR
+except Exception:
+    # Fallback to no-cache mode if /tmp is unavailable in the runtime.
+    fpdf_module.FPDF_CACHE_MODE = 1
 
 PAGE_W = 612
 PAGE_H = 792
@@ -111,6 +120,8 @@ DISCONNECT_ERRNOS = {
 if hasattr(errno, "WSAECONNRESET"):
     DISCONNECT_ERRNOS.add(errno.WSAECONNRESET)  # pragma: no cover
 
+FONT_INIT_LOCK = threading.Lock()
+
 
 def _is_client_disconnect(exc: BaseException) -> bool:
     if isinstance(exc, (BrokenPipeError, ConnectionResetError, TimeoutError)):
@@ -146,6 +157,12 @@ def _max_items_for_pages(page_count: int) -> int:
     return FIRST_PAGE_CAPACITY + LAST_PAGE_CAPACITY + MID_PAGE_CAPACITY * (page_count - 2)
 
 
+DEFAULT_MAX_CONCURRENT_RENDERS = 2
+MAX_CONCURRENT_RENDERS = _env_int("INVOICE_MAX_CONCURRENT_RENDERS", DEFAULT_MAX_CONCURRENT_RENDERS, minimum=1)
+RENDER_QUEUE_TIMEOUT_MS = _env_int("INVOICE_RENDER_QUEUE_TIMEOUT_MS", 1500, minimum=0)
+RENDER_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_RENDERS)
+
+
 def _find_font_path(env_var: str, candidates: List[str]) -> Optional[str]:
     # Allow override via env var
     override = os.getenv(env_var)
@@ -178,35 +195,37 @@ class FontManager:
         fallback_path = os.path.join(_SCRIPT_DIR, "fonts", "DejaVuSans.ttf")
         fallback_bold_path = os.path.join(_SCRIPT_DIR, "fonts", "DejaVuSans-Bold.ttf")
 
-        if os.path.exists(primary_path):
-            try:
-                self.pdf.add_font(self.PRIMARY_FAMILY, "", primary_path, uni=True)
-                if os.path.exists(primary_bold_path):
-                    self.pdf.add_font(self.PRIMARY_FAMILY, "B", primary_bold_path, uni=True)
-                    self.has_bold = True
-                self.family = self.PRIMARY_FAMILY
-                self.use_unicode = True
-            except Exception:
-                pass
-
-        if os.path.exists(fallback_path):
-            try:
-                self.pdf.add_font(self.FALLBACK_FAMILY, "", fallback_path, uni=True)
-                if os.path.exists(fallback_bold_path):
-                    self.pdf.add_font(self.FALLBACK_FAMILY, "B", fallback_bold_path, uni=True)
-                self.has_fallback = True
-                # If primary failed, use fallback as main font
-                if not self.use_unicode:
-                    self.family = self.FALLBACK_FAMILY
+        # pyfpdf font registration touches shared cache/files; serialize it.
+        with FONT_INIT_LOCK:
+            if os.path.exists(primary_path):
+                try:
+                    self.pdf.add_font(self.PRIMARY_FAMILY, "", primary_path, uni=True)
+                    if os.path.exists(primary_bold_path):
+                        self.pdf.add_font(self.PRIMARY_FAMILY, "B", primary_bold_path, uni=True)
+                        self.has_bold = True
+                    self.family = self.PRIMARY_FAMILY
                     self.use_unicode = True
-                    self.has_bold = os.path.exists(fallback_bold_path)
-            except Exception:
-                pass
+                except Exception:
+                    pass
 
-        # Cache primary font char widths for fallback checks
-        if self.family == self.PRIMARY_FAMILY and self.has_fallback:
-            self.pdf.set_font(self.PRIMARY_FAMILY, "", 10)
-            self._primary_cw = self.pdf.current_font.get("cw")
+            if os.path.exists(fallback_path):
+                try:
+                    self.pdf.add_font(self.FALLBACK_FAMILY, "", fallback_path, uni=True)
+                    if os.path.exists(fallback_bold_path):
+                        self.pdf.add_font(self.FALLBACK_FAMILY, "B", fallback_bold_path, uni=True)
+                    self.has_fallback = True
+                    # If primary failed, use fallback as main font
+                    if not self.use_unicode:
+                        self.family = self.FALLBACK_FAMILY
+                        self.use_unicode = True
+                        self.has_bold = os.path.exists(fallback_bold_path)
+                except Exception:
+                    pass
+
+            # Cache primary font char widths for fallback checks
+            if self.family == self.PRIMARY_FAMILY and self.has_fallback:
+                self.pdf.set_font(self.PRIMARY_FAMILY, "", 10)
+                self._primary_cw = self.pdf.current_font.get("cw")
 
     def _needs_fallback(self, char: str) -> bool:
         """Check if a character is missing from the primary font."""
@@ -643,13 +662,34 @@ class InvoiceHandler(BaseHTTPRequestHandler):
             )
             return
 
+        acquired = RENDER_SEMAPHORE.acquire(timeout=RENDER_QUEUE_TIMEOUT_MS / 1000.0)
+        if not acquired:
+            self._send_json(
+                503,
+                {
+                    "error": "server_busy",
+                    "detail": "Renderer is saturated; retry shortly.",
+                    "retry_after_ms": RENDER_QUEUE_TIMEOUT_MS,
+                },
+            )
+            return
+
         try:
             pdf_bytes = render_invoice(payload)
         except Exception as exc:
+            traceback.print_exc(file=sys.stderr)
             self._send_json(500, {"error": "render_failed", "detail": str(exc)})
             return
+        finally:
+            RENDER_SEMAPHORE.release()
 
         self._write_response(200, "application/pdf", pdf_bytes)
+
+    def do_GET(self) -> None:
+        if self.path in ("/", "/health", "/healthz", "/ready"):
+            self._send_json(200, {"status": "ok"})
+            return
+        self._send_json(404, {"error": "not_found", "detail": "Unsupported endpoint."})
 
     def handle_one_request(self) -> None:
         try:
@@ -663,8 +703,14 @@ class InvoiceHandler(BaseHTTPRequestHandler):
         return
 
 
+class InvoiceHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = _env_int("INVOICE_LISTEN_BACKLOG", 512, minimum=1)
+
+
 def run(host: str = "0.0.0.0", port: int = 8080) -> None:
-    server = ThreadingHTTPServer((host, port), InvoiceHandler)
+    server = InvoiceHTTPServer((host, port), InvoiceHandler)
     print(f"Invoice API server listening on http://{host}:{port}")
     server.serve_forever()
 
