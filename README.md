@@ -71,8 +71,10 @@ Each item in `items`:
 | `INVOICE_PORT` | `8080` | Server port |
 | `INVOICE_MAX_BODY_BYTES` | `268435456` | Maximum accepted request size in bytes |
 | `INVOICE_MAX_PAGES` | `10000` | Maximum rendered page count before request is rejected |
-| `INVOICE_MAX_CONCURRENT_RENDERS` | `4` | Maximum simultaneous PDF renders |
-| `INVOICE_RENDER_QUEUE_TIMEOUT_MS` | `45000` | Wait time for a render slot before returning `503` |
+| `INVOICE_MAX_CONCURRENT_RENDERS` | `min(32, CPU cores)` | Number of render worker processes |
+| `INVOICE_MAX_INFLIGHT_RENDERS` | `max(100, workers*4)` | Maximum running + queued render jobs |
+| `INVOICE_RENDER_QUEUE_TIMEOUT_MS` | `120000` | Wait time for queue slot before returning `503` |
+| `INVOICE_RENDER_TIMEOUT_MS` | `300000` | Maximum render execution time before returning `504` |
 | `INVOICE_LISTEN_BACKLOG` | `512` | TCP accept backlog size for burst traffic |
 | `INVOICE_FONT_CACHE_DIR` | `/tmp/invoice-font-cache` | Directory for font metric cache files |
 | `INVOICE_FONT_PATH` | *(auto-detected)* | Path to a TTF font for Unicode support |

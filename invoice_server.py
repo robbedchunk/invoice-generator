@@ -1,3 +1,6 @@
+import atexit
+from concurrent.futures import ProcessPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures.process import BrokenProcessPool
 import errno
 import json
 import os
@@ -157,10 +160,63 @@ def _max_items_for_pages(page_count: int) -> int:
     return FIRST_PAGE_CAPACITY + LAST_PAGE_CAPACITY + MID_PAGE_CAPACITY * (page_count - 2)
 
 
-DEFAULT_MAX_CONCURRENT_RENDERS = 4
+DEFAULT_MAX_CONCURRENT_RENDERS = max(4, min(32, os.cpu_count() or 4))
 MAX_CONCURRENT_RENDERS = _env_int("INVOICE_MAX_CONCURRENT_RENDERS", DEFAULT_MAX_CONCURRENT_RENDERS, minimum=1)
-RENDER_QUEUE_TIMEOUT_MS = _env_int("INVOICE_RENDER_QUEUE_TIMEOUT_MS", 45000, minimum=0)
-RENDER_SEMAPHORE = threading.BoundedSemaphore(MAX_CONCURRENT_RENDERS)
+MAX_INFLIGHT_RENDERS = _env_int("INVOICE_MAX_INFLIGHT_RENDERS", max(100, MAX_CONCURRENT_RENDERS * 4), minimum=1)
+RENDER_QUEUE_TIMEOUT_MS = _env_int("INVOICE_RENDER_QUEUE_TIMEOUT_MS", 120000, minimum=0)
+RENDER_TIMEOUT_MS = _env_int("INVOICE_RENDER_TIMEOUT_MS", 300000, minimum=1000)
+RENDER_INFLIGHT_SEMAPHORE = threading.BoundedSemaphore(MAX_INFLIGHT_RENDERS)
+RENDER_EXECUTOR_LOCK = threading.Lock()
+RENDER_EXECUTOR: Optional[ProcessPoolExecutor] = None
+
+
+def _create_render_executor() -> ProcessPoolExecutor:
+    return ProcessPoolExecutor(max_workers=MAX_CONCURRENT_RENDERS)
+
+
+def _get_render_executor() -> ProcessPoolExecutor:
+    global RENDER_EXECUTOR
+    with RENDER_EXECUTOR_LOCK:
+        if RENDER_EXECUTOR is None:
+            RENDER_EXECUTOR = _create_render_executor()
+        return RENDER_EXECUTOR
+
+
+def _restart_render_executor(previous: ProcessPoolExecutor) -> ProcessPoolExecutor:
+    global RENDER_EXECUTOR
+    with RENDER_EXECUTOR_LOCK:
+        if RENDER_EXECUTOR is previous:
+            try:
+                previous.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            RENDER_EXECUTOR = _create_render_executor()
+        if RENDER_EXECUTOR is None:
+            RENDER_EXECUTOR = _create_render_executor()
+        return RENDER_EXECUTOR
+
+
+def _submit_render_job(payload: Dict[str, Any]):
+    executor = _get_render_executor()
+    try:
+        return executor.submit(render_invoice, payload)
+    except BrokenProcessPool:
+        return _restart_render_executor(executor).submit(render_invoice, payload)
+
+
+def _shutdown_render_executor() -> None:
+    global RENDER_EXECUTOR
+    with RENDER_EXECUTOR_LOCK:
+        executor = RENDER_EXECUTOR
+        RENDER_EXECUTOR = None
+    if executor is not None:
+        try:
+            executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
+
+
+atexit.register(_shutdown_render_executor)
 
 
 def _find_font_path(env_var: str, candidates: List[str]) -> Optional[str]:
@@ -662,28 +718,53 @@ class InvoiceHandler(BaseHTTPRequestHandler):
             )
             return
 
-        acquired = RENDER_SEMAPHORE.acquire(timeout=RENDER_QUEUE_TIMEOUT_MS / 1000.0)
+        acquired = RENDER_INFLIGHT_SEMAPHORE.acquire(timeout=RENDER_QUEUE_TIMEOUT_MS / 1000.0)
         if not acquired:
             retry_after_seconds = max(1, (RENDER_QUEUE_TIMEOUT_MS + 999) // 1000)
             self._send_json(
                 503,
                 {
                     "error": "server_busy",
-                    "detail": "Renderer is saturated; retry shortly.",
+                    "detail": "Render queue is full; retry shortly.",
                     "retry_after_ms": RENDER_QUEUE_TIMEOUT_MS,
                     "retry_after_seconds": retry_after_seconds,
+                    "max_concurrent_renders": MAX_CONCURRENT_RENDERS,
+                    "max_inflight_renders": MAX_INFLIGHT_RENDERS,
                 },
             )
             return
 
+        future = None
         try:
-            pdf_bytes = render_invoice(payload)
+            future = _submit_render_job(payload)
+            pdf_bytes = future.result(timeout=RENDER_TIMEOUT_MS / 1000.0)
+        except FutureTimeoutError:
+            if future is not None:
+                future.cancel()
+            self._send_json(
+                504,
+                {
+                    "error": "render_timeout",
+                    "detail": f"Render exceeded timeout of {RENDER_TIMEOUT_MS} ms.",
+                },
+            )
+            return
+        except BrokenProcessPool:
+            _restart_render_executor(_get_render_executor())
+            self._send_json(
+                503,
+                {
+                    "error": "render_pool_restarting",
+                    "detail": "Render worker pool restarted; retry shortly.",
+                },
+            )
+            return
         except Exception as exc:
             traceback.print_exc(file=sys.stderr)
             self._send_json(500, {"error": "render_failed", "detail": str(exc)})
             return
         finally:
-            RENDER_SEMAPHORE.release()
+            RENDER_INFLIGHT_SEMAPHORE.release()
 
         self._write_response(200, "application/pdf", pdf_bytes)
 
