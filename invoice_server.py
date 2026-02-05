@@ -279,8 +279,9 @@ class FontManager:
     def set_font(self, size: int) -> None:
         self.pdf.set_font(self.family, "", size)
 
-    def text_width(self, text: str, size: int) -> float:
-        self.pdf.set_font(self.family, "", size)
+    def text_width(self, text: str, size: int, bold: bool = False) -> float:
+        style = "B" if bold and self.has_bold else ""
+        self.pdf.set_font(self.family, style, size)
         return self.pdf.get_string_width(text)
 
     def draw_text(self, x: float, y: float, text: str, size: int, color: Tuple[int, int, int], bold: bool = False) -> None:
@@ -331,6 +332,54 @@ def _split_lines(text: str) -> List[str]:
     if not text:
         return []
     return [line for line in text.split("\n") if line.strip() != ""]
+
+NAME_LINE_H = 13.0
+ITEM_TO_QTY_GUTTER = 18.0
+
+
+def _wrap_text(
+    fonts_obj: "FontManager",
+    text: str,
+    max_width: float,
+    font_size: int,
+    bold: bool = False,
+) -> List[str]:
+    def _line_width(value: str) -> float:
+        return fonts_obj.text_width(value, font_size, bold=bold)
+
+    def _wrap_paragraph(paragraph: str) -> List[str]:
+        words = paragraph.split()
+        if not words:
+            return [paragraph]
+        lines: List[str] = []
+        current = ""
+        for word in words:
+            candidate = word if not current else f"{current} {word}"
+            if _line_width(candidate) <= max_width:
+                current = candidate
+                continue
+            if current:
+                lines.append(current)
+                current = word
+            else:
+                chunk = ""
+                for ch in word:
+                    candidate_chunk = chunk + ch
+                    if chunk and _line_width(candidate_chunk) > max_width:
+                        lines.append(chunk)
+                        chunk = ch
+                    else:
+                        chunk = candidate_chunk
+                current = chunk
+        if current:
+            lines.append(current)
+        return lines
+
+    result: List[str] = []
+    for paragraph in text.split("\n"):
+        result.extend(_wrap_paragraph(paragraph))
+    return result if result else [text]
+
 
 def _round_rect(pdf: FPDF, x: float, y: float, w: float, h: float, r: float, fill: bool = True) -> None:
     r = max(0.0, min(r, w / 2.0, h / 2.0))
@@ -415,7 +464,8 @@ def render_invoice(data: Dict[str, Any]) -> bytes:
         fonts.draw_text(rate_center - fonts.text_width(rate_label, FONT_SIZE_SMALL) / 2.0, text_y, rate_label, FONT_SIZE_SMALL, COLOR_BAR_TEXT, bold=True)
         fonts.draw_text(amount_center - fonts.text_width(amt_label, FONT_SIZE_SMALL) / 2.0, text_y, amt_label, FONT_SIZE_SMALL, COLOR_BAR_TEXT, bold=True)
 
-    def draw_items(start_y: float, page_items: List[Dict[str, Any]], row_h: float) -> None:
+    def draw_items(start_y: float, page_items: List[Dict[str, Any]], row_h: float) -> float:
+        max_name_w = qty_center - X_ITEM - ITEM_TO_QTY_GUTTER
         y = start_y
         for item in page_items:
             name = str(item.get("name", "")).strip()
@@ -423,8 +473,21 @@ def render_invoice(data: Dict[str, Any]) -> bytes:
             unit_cost = _safe_float(item.get("unit_cost", 0.0), 0.0)
             amount = qty * unit_cost
 
+            num_name_lines = 1
             if name:
-                fonts.draw_text(X_ITEM, y, name, FONT_SIZE_NORMAL, COLOR_ITEM, bold=True)
+                paragraphs = name.split("\n")
+                all_lines: List[Tuple[str, bool]] = []
+                for p_idx, para in enumerate(paragraphs):
+                    para = para.strip()
+                    if not para:
+                        continue
+                    is_first_para = (p_idx == 0)
+                    wrapped = _wrap_text(fonts, para, max_name_w, FONT_SIZE_NORMAL, bold=is_first_para)
+                    for line in wrapped:
+                        all_lines.append((line, is_first_para))
+                num_name_lines = len(all_lines) if all_lines else 1
+                for i, (line, bold) in enumerate(all_lines):
+                    fonts.draw_text(X_ITEM, y + i * NAME_LINE_H, line, FONT_SIZE_NORMAL, COLOR_ITEM, bold=bold)
 
             qty_text = _fmt_qty(qty)
             rate_text = _fmt_money(unit_cost, symbol)
@@ -434,7 +497,8 @@ def render_invoice(data: Dict[str, Any]) -> bytes:
             fonts.draw_text(RATE_RIGHT - fonts.text_width(rate_text, FONT_SIZE_NORMAL), y, rate_text, FONT_SIZE_NORMAL, COLOR_NUM, bold=False)
             fonts.draw_text(RIGHT_AMOUNT - fonts.text_width(amt_text, FONT_SIZE_NORMAL), y, amt_text, FONT_SIZE_NORMAL, COLOR_NUM, bold=False)
 
-            y += row_h
+            y += (num_name_lines - 1) * NAME_LINE_H + row_h
+        return y
 
     def draw_totals(start_y: float, row_h: float) -> None:
         totals_y = start_y
@@ -454,10 +518,18 @@ def render_invoice(data: Dict[str, Any]) -> bytes:
         notes = str(data.get("notes", "")).strip()
         if not notes:
             return
+        page_bottom = PAGE_H - 30
+        cont_top = 30.0
+
         fonts.draw_text(X_ITEM, label_y, "Notes:", FONT_SIZE_NORMAL, COLOR_TEXT, bold=False)
         note_lines = _split_lines(notes)
-        for idx, line in enumerate(note_lines):
-            fonts.draw_text(X_ITEM, text_y + (idx * line_h), line, FONT_SIZE_NORMAL, COLOR_NOTES, bold=False)
+        y = text_y
+        for line in note_lines:
+            if y > page_bottom:
+                pdf.add_page()
+                y = cont_top
+            fonts.draw_text(X_ITEM, y, line, FONT_SIZE_NORMAL, COLOR_NOTES, bold=False)
+            y += line_h
 
     def draw_header_full() -> None:
         sender = str(data.get("from", "")).strip()
@@ -543,9 +615,19 @@ def render_invoice(data: Dict[str, Any]) -> bytes:
     if len(items) <= FIRST_PAGE_CAPACITY:
         draw_header_full()
         draw_table_header(BAR_Y_FIRST, BAR_TEXT_Y_FIRST)
-        draw_items(ITEMS_START_Y_FIRST, items, ITEM_ROW_H)
-        draw_totals(TOTALS_START_Y_FIRST, TOTAL_ROW_H_FIRST)
-        draw_notes(NOTES_LABEL_Y_FIRST, NOTES_TEXT_Y_FIRST, NOTES_LINE_H_FIRST)
+        items_end_y = draw_items(ITEMS_START_Y_FIRST, items, ITEM_ROW_H)
+
+        # Compute totals Y from where items actually end to avoid overlap
+        totals_y = max(TOTALS_START_Y_FIRST, items_end_y + ITEM_ROW_H)
+        draw_totals(totals_y, TOTAL_ROW_H_FIRST)
+
+        # Compute notes Y from where totals actually end
+        totals_rows = 3 if discount_label else 2
+        totals_end_y = totals_y + (totals_rows - 1) * TOTAL_ROW_H_FIRST
+        notes_gap = NOTES_LABEL_Y_FIRST - (TOTALS_START_Y_FIRST + 2 * TOTAL_ROW_H_FIRST)
+        notes_label_y = max(NOTES_LABEL_Y_FIRST, totals_end_y + notes_gap)
+        notes_text_y = notes_label_y + (NOTES_TEXT_Y_FIRST - NOTES_LABEL_Y_FIRST)
+        draw_notes(notes_label_y, notes_text_y, NOTES_LINE_H_FIRST)
     else:
         draw_header_full()
         draw_table_header(BAR_Y_FIRST, BAR_TEXT_Y_FIRST)
